@@ -1,0 +1,263 @@
+name: Build The Forge APK
+
+# Builds an installable Android APK in the cloud. Nothing is needed on your own
+# computer. When it finishes, the APK is attached to the "latest" Release, which
+# a Fire tablet can download directly without signing in.
+#
+# FOUR FAILSAFES, each added after a real failed run:
+#   1. THE PROJECT IS FOUND WHEREVER IT SITS. Gradle must be run in the folder
+#      holding settings.gradle. If the project was uploaded as a subfolder, a
+#      build at the repository root fails with "does not contain a Gradle
+#      build". The first step now searches for settings.gradle and every later
+#      step works in that folder, so either upload style builds.
+#   2. Gradle is downloaded at a pinned version rather than taken from whatever
+#      the runner image happens to ship, and it is invoked as "gradle", never
+#      "./gradlew": this project carries no wrapper script.
+#   3. A build log is uploaded even when the run goes red, so a failure always
+#      leaves something to read.
+#   4. If the modern toolchain fails for any reason, a second job runs
+#      automatically on an older, very well proven pairing.
+# No "|| true" anywhere: a failure must go red, never green with no artefact.
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+# needed to publish the APK as a Release, which unlike an Actions artifact can
+# be downloaded on a tablet without signing in to GitHub
+permissions:
+  contents: write
+
+env:
+  GRADLE_VERSION: "8.7"
+  FALLBACK_GRADLE_VERSION: "7.6.4"
+
+jobs:
+  build:
+    name: Build (current toolchain)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the project
+        uses: actions/checkout@v4
+
+      - name: Find the Gradle project
+        run: |
+          set -euo pipefail
+          dir="$(find . -maxdepth 4 -name settings.gradle -not -path './.git/*' -printf '%h\n' | head -n 1)"
+          if [ -z "$dir" ]; then
+            echo "::error::No settings.gradle anywhere in this repository."
+            echo "Upload either the the_forge_android_project folder itself or its contents."
+            echo "What the repository actually holds:"
+            find . -maxdepth 3 -type d -not -path './.git*' | sed 's/^/    /'
+            exit 1
+          fi
+          echo "PROJECT_DIR=${dir#./}" >> "$GITHUB_ENV"
+          echo "Gradle project found in: ${dir#./}"
+          {
+            echo "### The Forge APK build"
+            echo ""
+            echo "Gradle project found in: ${dir#./}"
+            echo ""
+            echo '```'
+            ls -la "${dir}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install a pinned Gradle
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/gradle.zip \
+            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          unzip -q -d /opt/gradle /tmp/gradle.zip
+          echo "/opt/gradle/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Record the environment
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          { echo "== date ==";    date -u
+            echo "== project =="; pwd; ls -la
+            echo "== java ==";    java -version 2>&1
+            echo "== gradle ==";  gradle --version
+            echo "== sdk root =="; echo "${ANDROID_SDK_ROOT:-unset}"
+          } | tee build_log.txt
+
+      - name: Build the APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          # The pinned Gradle above is used directly, so no wrapper jar is needed.
+          gradle :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee -a build_log.txt
+          echo "---- built files ----" | tee -a build_log.txt
+          ls -la app/build/outputs/apk/debug/ | tee -a build_log.txt
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: the-forge-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Publish it where a tablet can actually download it
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # An Actions artifact needs a signed-in session and arrives as a zip,
+          # so it cannot be fetched from a Fire tablet's browser. A Release is
+          # public and hands over the .apk itself.
+          cp app/build/outputs/apk/debug/app-debug.apk the-forge.apk
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest the-forge.apk --clobber
+            # Restamp the title. Without this a FAILED run leaves the previous
+            # APK at "latest" looking exactly like a fresh one, which is how an
+            # old build gets installed and then blamed on the app.
+            gh release edit latest \
+              --title "The Forge (build #${{ github.run_number }})" \
+              --notes "Tap the-forge.apk below to install on a Fire tablet. No sign in needed. Build #${{ github.run_number }}, commit ${{ github.sha }}."
+          else
+            gh release create latest the-forge.apk \
+              --title "The Forge (build #${{ github.run_number }})" \
+              --notes "Tap the-forge.apk below to install on a Fire tablet. No sign in needed. Build #${{ github.run_number }}, commit ${{ github.sha }}."
+          fi
+
+      - name: Say why it failed, on this page
+        if: failure()
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set +e
+          {
+            echo ""
+            echo "### The build did not finish"
+            echo ""
+            echo "The last 60 lines of the log:"
+            echo '```'
+            tail -n 60 build_log.txt 2>/dev/null || echo "(no log was written, so the failure came before Gradle started)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "---- last 60 lines of build_log.txt ----"
+          tail -n 60 build_log.txt 2>/dev/null || true
+
+      - name: Upload the build log, pass or fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-current
+          path: ${{ env.PROJECT_DIR }}/build_log.txt
+          if-no-files-found: warn
+
+  fallback:
+    name: Build (older toolchain, only if the first fails)
+    needs: build
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the project
+        uses: actions/checkout@v4
+
+      - name: Find the Gradle project
+        run: |
+          set -euo pipefail
+          dir="$(find . -maxdepth 4 -name settings.gradle -not -path './.git/*' -printf '%h\n' | head -n 1)"
+          if [ -z "$dir" ]; then
+            echo "::error::No settings.gradle anywhere in this repository."
+            exit 1
+          fi
+          echo "PROJECT_DIR=${dir#./}" >> "$GITHUB_ENV"
+          echo "Gradle project found in: ${dir#./}"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install the fallback Gradle
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/gradle.zip \
+            "https://services.gradle.org/distributions/gradle-${FALLBACK_GRADLE_VERSION}-bin.zip"
+          unzip -q -d /opt/gradle /tmp/gradle.zip
+          echo "/opt/gradle/gradle-${FALLBACK_GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Step the project back to the older pairing
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          # Edited here rather than committed, so the repository keeps the modern
+          # settings and only this fallback run sees the older ones.
+          sed -i "s/com.android.tools.build:gradle:8.2.2/com.android.tools.build:gradle:7.4.2/" build.gradle
+          sed -i "s/compileSdk 34/compileSdk 33/; s/targetSdk 34/targetSdk 33/" app/build.gradle
+          sed -i "s/androidx.webkit:webkit:1.8.0/androidx.webkit:webkit:1.6.1/" app/build.gradle
+          { echo "== fallback edits =="; cat build.gradle; echo; cat app/build.gradle; } | tee build_log.txt
+
+      - name: Build the APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          gradle :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee -a build_log.txt
+          ls -la app/build/outputs/apk/debug/ | tee -a build_log.txt
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: the-forge-apk-fallback
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Publish it where a tablet can actually download it
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp app/build/outputs/apk/debug/app-debug.apk the-forge.apk
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest the-forge.apk --clobber
+            gh release edit latest \
+              --title "The Forge (build #${{ github.run_number }})" \
+              --notes "Tap the-forge.apk below to install on a Fire tablet. No sign in needed. Build #${{ github.run_number }}, commit ${{ github.sha }}."
+          else
+            gh release create latest the-forge.apk \
+              --title "The Forge (build #${{ github.run_number }})" \
+              --notes "Tap the-forge.apk below to install on a Fire tablet. No sign in needed. Build #${{ github.run_number }}, commit ${{ github.sha }}."
+          fi
+
+      - name: Say why it failed, on this page
+        if: failure()
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set +e
+          {
+            echo ""
+            echo "### The fallback build did not finish either"
+            echo ""
+            echo "The last 60 lines of the log:"
+            echo '```'
+            tail -n 60 build_log.txt 2>/dev/null || echo "(no log was written, so the failure came before Gradle started)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "---- last 60 lines of build_log.txt ----"
+          tail -n 60 build_log.txt 2>/dev/null || true
+
+      - name: Upload the build log, pass or fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-fallback
+          path: ${{ env.PROJECT_DIR }}/build_log.txt
+          if-no-files-found: warn
