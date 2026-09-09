@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  THE FORGE  |  Copyright (c) 2026 Yannie D. Forest. All rights reserved.
+  NO LICENCE IS GRANTED. No copying, adaptation, redistribution, reverse
+  engineering or commercial use without the author's written permission.
+  See LICENCE.txt. Every distributed copy carries a build marker.
+-->
+
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- No INTERNET permission, deliberately. The Forge contains no network
+         code at all, and without this permission Android itself will refuse any
+         attempt to reach the network. That makes the offline claim enforced by
+         the operating system rather than merely true of the code.
+         (If browser dictation is ever wanted and needs it, add the line back.) -->
+    <!-- No adaptive icon on purpose. An adaptive icon has a background layer
+         that fills the launcher's mask, and Fire OS masks to a rounded square.
+         A circular seal cannot cover a rounded square's corners, so the
+         background shows there, and a transparent background is drawn white by
+         the launcher. That was the white square behind the seal. With only the
+         legacy transparent PNG, the Fire launcher draws the seal as it is. -->
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.NoTitleBar">
+        <activity android:name=".MainActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
